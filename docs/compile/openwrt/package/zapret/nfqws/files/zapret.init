@@ -1,0 +1,147 @@
+#!/bin/sh /etc/rc.common
+
+. /lib/functions/network.sh
+
+USE_PROCD=1
+# after network
+START=21
+
+CONFIGURATION=zapret
+PIDDIR=/var/run
+
+load_custom_script()
+{
+    local port proto description opts opts_tmp enabled cports
+    config_get_bool enabled $1 enabled "0"
+    if [ "$enabled" = "1" ]
+    then
+        (($2++))
+        config_get description $1 description "$1"
+        config_get proto $1 proto "tcp"
+        config_get ports $1 ports
+        config_get opts $1 opts
+        if [ $proto = "udp" ]
+        then
+            opts_tmp = "--new --filter-udp="
+        else
+            opts_tmp = "--new --filter-tcp="
+        fi
+        for port in ${ports}
+        do
+            cports = "$cports,$port"
+            add_fw_crule $proto $port $2 $3 $4 "$description"
+        done
+        cports = $(echo -n "$cports"| sed 's/,$//')
+        opts = "${opts_tmp}${cports} $opts"
+        procd_append_param command "$opts"
+    fi
+}
+
+add_fw_crule()
+{
+    local num
+    $mum = $(($3++))
+    iptables -t mangle -I $num POSTROUTING -p $1 --dport $2 -m mark ! --mark "$4/$4" -j NFQUEUE --queue-num "$5" --queue-bypass -m comment --comment "\"$6\""
+}
+
+
+del_fw_crule()
+{
+    local enabled ports
+    config_get_bool enabled $1 enabled "0"
+    config_get ports $1 ports
+    if [ "$enabled" = "1" ]
+    then
+        for port in ${ports}
+        do
+            $num = $(($2++))
+            iptables -t mangle -D $num POSTROUTING
+        done
+    fi
+}
+
+
+start_service()
+{
+    echo "Starting Zapret service"
+    config_load "$CONFIGURATION"
+
+    local opts
+    local pid
+    local lanaddr
+    local qnum
+    local fports
+    local fwmark
+    local ifname
+    local ohttp ohttps oquic owg odht ounknown
+    local copts
+    local num
+
+    config_get opts nfqws opts
+    config_get pid nfqws pid "nfqws.pid"
+    config_get qnum nfqws qnum "200"
+    config_get fwmark nfqws fw_mark "0x40000000"
+    #config_get ohttp nfqws http_opts
+    #config_get ohttps nfqws https_opts
+    #config_get oquic nfqws quic_opts
+    #config_get owg nfqws wg_opts
+    #config_get odht nfqws dht_opts
+    #config_get ounknown nfqws unknown_opts
+    config_get num nfqws crule_start_num "100"
+
+    config_get copts nfqws custom_opts
+
+    network_find_wan ifname
+    procd_set_param netdev "$ifname"
+
+    procd_open_instance
+
+    procd_set_param command "/usr/bin/nfqws"
+    procd_append_param command "--user=nobody"
+    procd_append_param command "--pidfile=$pid"
+    procd_append_param command "--qnum=$qnum"
+    procd_append_param command "--dpi-desync-fwmark=$fwmark"
+    [ -n "$ohttp" ] && procd_append_param command "--new --filter-l7=http $ohttp"
+    [ -n "$ohttps" ] && procd_append_param command "--new --filter-l7=tls $ohttps"
+    [ -n "$oquic" ] && procd_append_param command "--new --filter-l7=quic $oquic"
+    [ -n "$owg" ] && procd_append_param command "--new --filter-l7=wireguard $owg"
+    [ -n "$odht" ] && procd_append_param command "--new --filter-l7=dht $odht"
+    [ -n "$ounknown" ] && procd_append_param command "--new --filter-l7=unknown $ounknown"
+
+    config_foreach load_custom_script zapret_custom $num $fwmark $qnum
+
+    procd_append_param command "$copts"
+
+    procd_set_param pidfile "$PIDDIR/$pid"
+
+    procd_close_instance
+}
+
+stop_service()
+{
+    # this procedure is called from stop()
+    # stop() already stop daemons
+    local num
+    config_load "$CONFIGURATION"
+    config_get num nfqws crule_start_num "100"
+    config_foreach del_fw_crule zapret_custom $num
+    procd_set_config_changed firewall
+    echo "STOP Zapret service"
+}
+
+service_triggers()
+{
+    procd_add_reload_trigger "zapret"
+}
+
+reload_service()
+{
+    echo "Restarting service"
+    stop
+    start
+}
+
+service_started()
+{
+    procd_set_config_changed firewall
+}
