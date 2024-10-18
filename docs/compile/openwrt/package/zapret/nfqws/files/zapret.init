@@ -41,9 +41,37 @@ add_fw_crule()
 {
     local num
     $mum = $(($3++))
-    iptables -t mangle -I $num POSTROUTING -p $1 --dport $2 -m mark ! --mark "$4/$4" -j NFQUEUE --queue-num "$5" --queue-bypass -m comment --comment "\"$6\""
+    if [ -x "$(command -v nft)" ]
+    then
+        nft add rule inet filter zapret meta mark and $4 == 0 $1 dport $2 queue num $5 bypass
+    else
+        iptables -t mangle -I $num POSTROUTING -p $1 --dport $2 -m mark ! --mark "$4/$4" -j NFQUEUE --queue-num "$5" --queue-bypass -m comment --comment "\"$6\""
+    fi
 }
 
+
+fw_init()
+{
+    if [ -x "$(command -v nft)" ]
+    then
+        nft delete chain inet filter zapret
+        nft add chain inet filter zapret "{type filter hook postrouting priority mangle;}"
+    else
+        iptables -D zone_wan_output -m comment --comment '!fw3' -j zone_wan_dest_ACCEPT
+    fi
+}
+
+fw_free()
+{
+    if [ -x "$(command -v nft)" ]
+    then
+        nft flush chain filter zapret
+        nft delete chain inet filter zapret
+    else
+        iptables -D zone_wan_output -m comment --comment '!fw3' -j zone_wan_dest_ACCEPT
+        iptables -A zone_wan_output -m comment --comment '!fw3' -j zone_wan_dest_ACCEPT
+    fi
+}
 
 del_fw_crule()
 {
@@ -52,11 +80,16 @@ del_fw_crule()
     config_get ports $1 ports
     if [ "$enabled" = "1" ]
     then
-        for port in ${ports}
-        do
-            $num = $(($2++))
-            iptables -t mangle -D $num POSTROUTING
-        done
+        if [ -x "$(command -v nft)" ]
+        then
+            nft flush chain filter zapret
+        else
+            for port in ${ports}
+            do
+                $num = $(($2++))
+                iptables -t mangle -D $num POSTROUTING
+            done
+        fi
     fi
 }
 
@@ -94,6 +127,8 @@ start_service()
     network_find_wan ifname
     procd_set_param netdev "$ifname"
 
+    fw_init
+
     procd_open_instance
 
     procd_set_param command "/usr/bin/nfqws"
@@ -125,6 +160,7 @@ stop_service()
     config_load "$CONFIGURATION"
     config_get num nfqws crule_start_num "100"
     config_foreach del_fw_crule zapret_custom $num
+    fw_free
     procd_set_config_changed firewall
     echo "STOP Zapret service"
 }
